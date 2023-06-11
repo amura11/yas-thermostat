@@ -5,4 +5,22 @@ default_config:
 logger:
   default: info
   logs:
-    custom_components.integration_blueprint: debug
+    custom_components.yas_thermostat: debug
+
+input_boolean:
+  fake:
+  fake2:
+
+climate:
+  - platform: yas_thermostat
+    name: Test
+    heater_switch: input_boolean.fake
+    cooler_switch: input_boolean.fake2
+    default_preset: Preset2
+    preset_modes:
+    - name: Preset1
+      target_temp_low: 10.123
+      target_temp_high: 20.455
+    - name: Preset2
+      target_temp_low: 10.123
+      target_temp_high: 20.455
