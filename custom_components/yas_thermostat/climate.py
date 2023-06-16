@@ -1,32 +1,44 @@
 """The YAS Thermostat integration."""
 from __future__ import annotations
+import asyncio
 import logging
-from homeassistant.components.climate.const import HVACMode
 import voluptuous as vol
-import homeassistant.helpers.config_validation as cv
 
-from typing import Any, Callable, Dict, Optional
-from homeassistant.core import DOMAIN as HA_DOMAIN, CoreState, callback, HomeAssistant
+from datetime import datetime, timedelta, timezone
+from homeassistant.core import (
+    HomeAssistant,
+    Event,
+    State,
+    CoreState,
+    callback,
+    DOMAIN as HA_DOMAIN,
+)
 from homeassistant.components.climate import ClimateEntity
+from homeassistant.components.climate.const import HVACMode
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-
-from homeassistant.components.climate import PLATFORM_SCHEMA, HVACMode
-
-from homeassistant.const import ATTR_NAME, ATTR_TEMPERATURE, UnitOfTemperature
+from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.components.climate import PLATFORM_SCHEMA
+from homeassistant.const import (
+    ATTR_NAME,
+    ATTR_ENTITY_ID,
+    ATTR_TEMPERATURE,
+    SERVICE_TURN_OFF,
+    SERVICE_TURN_ON,
+    STATE_ON,
+    EVENT_HOMEASSISTANT_START,
+    UnitOfTemperature,
+)
 
 from homeassistant.components.climate.const import (
     ATTR_MIN_TEMP,
     ATTR_MAX_TEMP,
-    ATTR_CURRENT_TEMPERATURE,
     ATTR_TARGET_TEMP_HIGH,
     ATTR_TARGET_TEMP_LOW,
-    ATTR_TARGET_TEMP_STEP,
     ATTR_FAN_MODE,
-    ATTR_FAN_MODES,
     ATTR_HVAC_MODE,
-    ATTR_HVAC_MODES,
     ATTR_PRESET_MODES,
     ClimateEntityFeature,
 )
@@ -37,12 +49,22 @@ from .const import (
     ATTR_FAN_SWITCH,
     ATTR_TEMP_SENSOR,
     ATTR_DEFAULT_PRESET,
+    ATTR_TEMP_TOLERANCE,
+    ATTR_TEMP_STEP,
+    ATTR_MIN_CYCLE_DURATION,
+    ATTR_MANUAL_FAN_MODE,
+    ATTR_MANUAL_HVAC_MODE,
+    ATTR_MANUAL_TEMP_LOW,
+    ATTR_MANUAL_TEMP_HIGH,
+    ATTR_LAST_CYCLE,
     FanMode,
 )
 
 _LOGGER = logging.getLogger(__name__)
-DEFAULT_MIN_TEMP = 7
-DEFAULT_MAX_TEMP = 35
+DEFAULT_TEMP_MIN = 7
+DEFAULT_TEMP_MAX = 35
+DEFAULT_MIN_CYCLE_DURATION = timedelta(minutes=5)
+DEFAULT_TEMP_TOLERANCE = 0.75
 
 PRESET_SCHEMA = vol.Schema(
     {
@@ -65,14 +87,19 @@ PRESET_SCHEMA = vol.Schema(
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
         vol.Required(ATTR_NAME): cv.string,
-        vol.Required(ATTR_PRESET_MODES): vol.All(cv.ensure_list, [PRESET_SCHEMA]),
-        vol.Optional(ATTR_TEMP_SENSOR): cv.entity_id,
+        vol.Required(ATTR_TEMP_SENSOR): cv.entity_id,
         vol.Optional(ATTR_COOLER_SWITCH): cv.entity_id,
         vol.Optional(ATTR_HEATER_SWITCH): cv.entity_id,
         vol.Optional(ATTR_FAN_SWITCH): cv.entity_id,
         vol.Optional(ATTR_DEFAULT_PRESET): cv.string,
         vol.Optional(ATTR_MIN_TEMP): vol.Coerce(float),
         vol.Optional(ATTR_MAX_TEMP): vol.Coerce(float),
+        vol.Optional(ATTR_TEMP_STEP): vol.Coerce(float),
+        vol.Optional(ATTR_MIN_CYCLE_DURATION): vol.All(
+            cv.time_period, cv.positive_timedelta
+        ),
+        vol.Optional(ATTR_TEMP_TOLERANCE): vol.Coerce(float),
+        vol.Required(ATTR_PRESET_MODES): vol.All(cv.ensure_list, [PRESET_SCHEMA]),
     }
 )
 
@@ -98,8 +125,8 @@ async def async_setup_platform(
                 ClimateSettings(
                     p.get(ATTR_TARGET_TEMP_LOW),
                     p.get(ATTR_TARGET_TEMP_HIGH),
-                    p.get(ATTR_HVAC_MODE, HVACMode.AUTO),
-                    p.get(ATTR_FAN_MODE, None),
+                    p.get(ATTR_HVAC_MODE, HVACMode.HEAT_COOL),
+                    p.get(ATTR_FAN_MODE, FanMode.AUTO),
                 ),
             ),
             config[ATTR_PRESET_MODES],
@@ -109,83 +136,34 @@ async def async_setup_platform(
     cooler_switch_id = config.get(ATTR_COOLER_SWITCH)
     fan_switch_id = config.get(ATTR_FAN_SWITCH)
     default_preset: str = config.get(ATTR_DEFAULT_PRESET, next(iter(presets)))
+    temp_sensor_id = config.get(ATTR_TEMP_SENSOR)
     temp_unit: UnitOfTemperature = hass.config.units.temperature_unit
-    min_temp: float | None = config.get(ATTR_MIN_TEMP, DEFAULT_MIN_TEMP)
-    max_temp: float | None = config.get(ATTR_MAX_TEMP, DEFAULT_MAX_TEMP)
+    temp_min: float = config.get(ATTR_MIN_TEMP, DEFAULT_TEMP_MIN)
+    temp_max: float = config.get(ATTR_MAX_TEMP, DEFAULT_TEMP_MAX)
+    temp_tolerance: float = config.get(ATTR_TEMP_TOLERANCE, DEFAULT_TEMP_TOLERANCE)
+    temp_step: float = config.get(ATTR_TEMP_STEP, 1.0)
+    min_cycle_duration: timedelta = config.get(
+        ATTR_MIN_CYCLE_DURATION, DEFAULT_MIN_CYCLE_DURATION
+    )
 
     entities = [
         YetAnotherSmartThermostat(
             name,
+            temp_sensor_id,
             heater_switch_id,
             cooler_switch_id,
             fan_switch_id,
-            min_temp,
-            max_temp,
+            temp_min,
+            temp_max,
             temp_unit,
+            temp_tolerance,
+            temp_step,
+            min_cycle_duration,
             presets,
             default_preset,
         )
     ]
     async_add_entities(entities, update_before_add=True)
-
-
-class ClimateSettings:
-    """Class to store current and preset thermostat settings"""
-
-    _temp_high: float
-    _temp_low: float
-    _hvac_mode: HVACMode
-    _fan_mode: FanMode
-
-    def __init__(
-        self,
-        temp_low: float,
-        temp_high: float,
-        hvac_mode: HVACMode,
-        fan_mode: FanMode | None,
-    ) -> None:
-        """Initializes an instance of the thermostat preset"""
-        self._temp_high = temp_high
-        self._temp_low = temp_low
-        self._hvac_mode = hvac_mode
-        self._fan_mode = fan_mode
-
-    @property
-    def temp_high(self) -> float:
-        return self._temp_high
-
-    @temp_high.setter
-    def temp_high(self, value: float) -> None:
-        self._temp_high = value
-
-    @property
-    def temp_low(self) -> float:
-        return self._temp_low
-
-    @temp_low.setter
-    def temp_low(self, value: float) -> None:
-        self._temp_low = value
-
-    @property
-    def hvac_mode(self) -> HVACMode:
-        return self._hvac_mode
-
-    @hvac_mode.setter
-    def hvac_mode(self, value: HVACMode) -> None:
-        self._hvac_mode = value
-
-    @property
-    def fan_mode(self) -> FanMode | None:
-        return self._fan_mode
-
-    @fan_mode.setter
-    def fan_mode(self, value: FanMode | None) -> None:
-        self._fan_mode = value
-
-    def clone(self) -> ClimateSettings:
-        return ClimateSettings(
-            self.temp_low, self.temp_high, self.hvac_mode, self.fan_mode
-        )
 
 
 class YetAnotherSmartThermostat(ClimateEntity, RestoreEntity):
@@ -198,37 +176,61 @@ class YetAnotherSmartThermostat(ClimateEntity, RestoreEntity):
     _current_settings: ClimateSettings
     _current_preset: str | None = None
     _current_temp: float | None = 12.34
-    _min_temp: float
-    _max_temp: float
+    _temp_sensor_id: str
+    _temp_min: float
+    _temp_max: float
     _temp_unit: UnitOfTemperature
+    _temp_tolerance: float
+    _temp_step: float
+    _min_cycle_duration: timedelta
+    _last_cycle: datetime | None = None
+    _is_heater_active: bool = False
+    _is_cooler_active: bool = False
+    _is_fan_active: bool = False
 
     _supported_features: ClimateEntityFeature = (
         ClimateEntityFeature.PRESET_MODE | ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
     )
-    _available_hvac_modes: list[HVACMode] = [HVACMode.OFF, HVACMode.AUTO]
+    _available_hvac_modes: list[HVACMode] = [HVACMode.OFF]
     _available_fan_modes: list[FanMode] | None = None
+    _valid_heat_hvac_modes: list[HVACMode] = [
+        HVACMode.HEAT_COOL,
+        HVACMode.HEAT,
+    ]
+    _valid_cool_hvac_modes: list[HVACMode] = [
+        HVACMode.HEAT_COOL,
+        HVACMode.COOL,
+    ]
 
     def __init__(
         self,
         name: str,
+        temp_sensor_id: str,
         heater_entity_id: str | None,
         cooler_entity_id: str | None,
         fan_entity_id: str | None,
-        min_temp: float | None,
-        max_temp: float | None,
+        temp_min: float | None,
+        temp_max: float | None,
         temp_unit: UnitOfTemperature,
+        temp_tolerance: float,
+        temp_step: float,
+        min_cycle_duration: timedelta,
         presets: dict[str, ClimateSettings],
         initial_preset: str,
     ) -> None:
-        """Initialize Thermostat"""
+        """Initializes a new instance of the YetAnotherSmartThermostat class"""
         self._name = name
         self._presets = presets
-        self._temp_unit = temp_unit
         self._heater_switch_id = heater_entity_id
         self._cooler_switch_id = cooler_entity_id
         self._fan_switch_id = fan_entity_id
-        self._min_temp = min_temp
-        self._max_temp = max_temp
+        self._temp_sensor_id = temp_sensor_id
+        self._temp_min = temp_min
+        self._temp_max = temp_max
+        self._temp_unit = temp_unit
+        self._temp_tolerance = temp_tolerance
+        self._temp_step = temp_step
+        self._min_cycle_duration = min_cycle_duration
 
         # Setup modes and features
         if fan_entity_id is not None:
@@ -243,7 +245,95 @@ class YetAnotherSmartThermostat(ClimateEntity, RestoreEntity):
             self._available_hvac_modes.append(HVACMode.HEAT_COOL)
 
         # Initialize the default preset
-        self.set_preset_mode(initial_preset)
+        self._current_preset = initial_preset
+        self._current_settings = self._presets[initial_preset].clone()
+
+    async def async_added_to_hass(self) -> None:
+        """Run when entity about to be added."""
+
+        await super().async_added_to_hass()
+
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass, [self._temp_sensor_id], self._async_on_temperature_changed
+            )
+        )
+
+        if self._heater_switch_id is not None:
+            self.async_on_remove(
+                async_track_state_change_event(
+                    self.hass, [self._heater_switch_id], self._on_heater_switch_changed
+                )
+            )
+
+        if self._cooler_switch_id is not None:
+            self.async_on_remove(
+                async_track_state_change_event(
+                    self.hass, [self._cooler_switch_id], self._on_cooler_switch_changed
+                )
+            )
+
+        # Startup function to run at HA startup or on creation, loads current values and old state
+        @callback
+        def _async_startup(*_) -> None:
+            sensor_state = self.hass.states.get(self._temp_sensor_id)
+            self._current_temp = (
+                float(sensor_state.state) if sensor_state is not None else None
+            )
+
+            if self._cooler_switch_id is not None:
+                cooler_state: State | None = self.hass.states.get(
+                    self._cooler_switch_id
+                )
+                self._is_cooler_active = (
+                    cooler_state.state == STATE_ON
+                    if cooler_state is not None
+                    else False
+                )
+
+            if self._heater_switch_id is not None:
+                heater_state: State | None = self.hass.states.get(
+                    self._heater_switch_id
+                )
+                self._is_heater_active = (
+                    heater_state.state == STATE_ON
+                    if heater_state is not None
+                    else False
+                )
+
+            if self._fan_switch_id is not None:
+                fan_state: State | None = self.hass.states.get(self._fan_switch_id)
+                self._is_fan_active = (
+                    fan_state.state == STATE_ON if fan_state is not None else False
+                )
+
+            # Call update to get things going
+            asyncio.run_coroutine_threadsafe(self.async_update(), self.hass.loop)
+
+        # Call the startup function either immediately if HA is running or wait until it is to run it
+        if self.hass.state == CoreState.running:
+            _async_startup()
+        else:
+            self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_START, _async_startup)
+
+    @property
+    def extra_state_attributes(self):
+        """Return entity specific state attributes to be saved."""
+        data = {
+            ATTR_LAST_CYCLE: self._last_cycle,
+            ATTR_MANUAL_HVAC_MODE: None,
+            ATTR_MANUAL_FAN_MODE: None,
+            ATTR_MANUAL_TEMP_LOW: None,
+            ATTR_MANUAL_TEMP_HIGH: None,
+        }
+
+        if self._current_preset is None:
+            data[ATTR_MANUAL_HVAC_MODE] = self._current_settings.hvac_mode
+            data[ATTR_MANUAL_FAN_MODE] = self._current_settings.fan_mode
+            data[ATTR_MANUAL_TEMP_LOW] = self._current_settings.temp_low
+            data[ATTR_MANUAL_TEMP_HIGH] = self._current_settings.temp_high
+
+        return data
 
     @property
     def name(self) -> str:
@@ -253,19 +343,16 @@ class YetAnotherSmartThermostat(ClimateEntity, RestoreEntity):
     @property
     def supported_features(self) -> ClimateEntityFeature:
         """Return the list of supported features."""
-        _LOGGER.debug("Getting supported features %s", self._supported_features)
         return self._supported_features
 
     @property
     def target_temperature_low(self) -> float | None:
         """Return the lowbound target temperature we try to reach."""
-        _LOGGER.debug("Getting low temp: %d", self._current_settings.temp_low)
         return self._current_settings.temp_low
 
     @property
     def target_temperature_high(self) -> float | None:
         """Return the highbound target temperature we try to reach."""
-        _LOGGER.debug("Getting high temp: %d", self._current_settings.temp_high)
         return self._current_settings.temp_high
 
     @property
@@ -273,7 +360,7 @@ class YetAnotherSmartThermostat(ClimateEntity, RestoreEntity):
         """Return the current temperature."""
         return self._current_temp
 
-    def set_temperature(self, **kwargs) -> None:
+    async def async_set_temperature(self, **kwargs) -> None:
         """Sets the new temperature."""
         temp = kwargs.get(ATTR_TEMPERATURE)
         temp_low = kwargs.get(ATTR_TARGET_TEMP_LOW)
@@ -282,16 +369,21 @@ class YetAnotherSmartThermostat(ClimateEntity, RestoreEntity):
         if temp is not None:
             raise ValueError("Target temperature mode not supported")
 
-        if temp_low is not None:
-            self._current_settings.temp_low = temp_low
-        if temp_high is not None:
-            self._current_settings.temp_high = temp_high
+        if temp_low is None and temp_high is None:
+            raise ValueError("At least one temperature value is required")
 
         self._current_preset = None
-
-        _LOGGER.debug(
-            "Temperature set to range (%d,%d), preset value reset", temp_low, temp_high
+        self._current_settings.temp_low = (
+            temp_low if temp_low is not None else self._current_settings.temp_low
         )
+        self._current_settings.temp_high = (
+            temp_high if temp_high is not None else self._current_settings.temp_high
+        )
+
+        _LOGGER.debug("Temperate range changed to %s - %s", temp_low, temp_high)
+
+        await self.async_update()
+        self.async_write_ha_state()
 
     @property
     def hvac_modes(self) -> list[HVACMode]:
@@ -303,11 +395,15 @@ class YetAnotherSmartThermostat(ClimateEntity, RestoreEntity):
         """Returns the current HVAC mode."""
         return self._current_settings.hvac_mode
 
-    def set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-        self._current_settings.hvac_mode = hvac_mode
-        self._current_preset = None
+    async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        """Set new hvac mode."""
+        _LOGGER.debug("Setting HVac Mode to %s", hvac_mode)
 
-        _LOGGER.debug("HVAC Mode set to %s, preset value reset", hvac_mode)
+        self._current_preset = None
+        self._current_settings.hvac_mode = hvac_mode
+
+        await self.async_update()
+        self.async_write_ha_state()
 
     @property
     def preset_modes(self) -> list[str] | None:
@@ -318,14 +414,35 @@ class YetAnotherSmartThermostat(ClimateEntity, RestoreEntity):
         """Returns the current preset mode or none."""
         return self._current_preset
 
-    def set_preset_mode(self, preset_mode: str) -> None:
+    async def async_set_preset_mode(self, preset_mode: str) -> None:
+        """Set new preset mode."""
         if preset_mode not in self._presets:
             raise KeyError("Preset does not exist")
+
+        _LOGGER.debug("Changing preset to %s", preset_mode)
 
         self._current_preset = preset_mode
         self._current_settings = self._presets[preset_mode].clone()
 
-        _LOGGER.debug("Preset set to %s", preset_mode)
+        await self.async_update()
+        self.async_write_ha_state()
+
+    @property
+    def fan_modes(self) -> list[str]:
+        return self._available_fan_modes
+
+    @property
+    def fan_mode(self) -> str:
+        return self._current_settings.fan_mode
+
+    async def async_set_fan_mode(self, fan_mode: str | FanMode) -> None:
+        _LOGGER.debug("Changing Fan Mode to %s", fan_mode)
+
+        self._current_preset = None
+        self._current_settings.fan_mode = fan_mode
+
+        await self.async_update()
+        self.async_write_ha_state()
 
     @property
     def temperature_unit(self) -> UnitOfTemperature:
@@ -334,15 +451,216 @@ class YetAnotherSmartThermostat(ClimateEntity, RestoreEntity):
     @property
     def target_temperature_step(self) -> float | None:
         """Return the supported step of target temperature."""
-        return 1
+        return self._temp_step
 
     @property
     def min_temp(self) -> float:
-        return self._min_temp
+        return self._temp_min
 
     @property
     def max_temp(self) -> float:
-        return self._max_temp
+        return self._temp_max
 
-    def update(self) -> None:
-        _LOGGER.info("Thermostat test! Name is %s", self._name)
+    @property
+    def _is_cooling_needed(self) -> bool:
+        return (
+            self._current_temp - self._current_settings.temp_high > self._temp_tolerance
+            and self._current_settings.hvac_mode in self._valid_cool_hvac_modes
+        )
+
+    @property
+    def _is_heating_needed(self) -> bool:
+        return (
+            self._current_settings.temp_low - self._current_temp > self._temp_tolerance
+            and self._current_settings.hvac_mode in self._valid_heat_hvac_modes
+        )
+
+    @property
+    def _is_fan_needed(self) -> bool:
+        return (
+            self._current_settings.hvac_mode == HVACMode.FAN_ONLY
+            or self._current_settings.fan_mode == FanMode.ON
+            or (
+                self._current_settings.fan_mode == FanMode.AUTO
+                and (self._is_cooler_active is True or self._is_heater_active is True)
+            )
+        )
+
+    async def async_update(self) -> None:
+        """Performs the entity update procedure"""
+        delta: timedelta | None = (
+            datetime.now(timezone.utc) - self._last_cycle
+            if self._last_cycle is not None
+            else None
+        )
+        cooler_changed: bool = False
+        heater_changed: bool = False
+        fan_changed: bool = False
+
+        if delta is None or delta > self._min_cycle_duration:
+            if self._is_cooling_needed is True:
+                cooler_changed |= await self._async_cooler_on()
+                if cooler_changed:
+                    _LOGGER.debug("Cooler required and was enabled")
+            else:
+                cooler_changed |= await self._async_cooler_off()
+                if cooler_changed:
+                    _LOGGER.debug("Cooler not required and was disabled")
+
+            if self._is_heating_needed is True:
+                heater_changed |= await self._async_heater_on()
+                if heater_changed:
+                    _LOGGER.debug("Heater required and was enabled")
+            else:
+                heater_changed |= await self._async_heater_off()
+                if heater_changed:
+                    _LOGGER.debug("Heater not required and was disabled")
+
+        if self._is_fan_needed is True:
+            fan_changed |= await self._async_fan_on()
+            if fan_changed:
+                _LOGGER.debug("Fan required and was enabled")
+        else:
+            fan_changed |= await self._async_fan_off()
+            if fan_changed:
+                _LOGGER.debug("Fan not required and was disabled")
+
+        if cooler_changed or heater_changed:
+            self._last_cycle = datetime.now(timezone.utc)
+
+        if cooler_changed or heater_changed or fan_changed:
+            self.async_write_ha_state()
+
+    async def _async_cooler_on(self) -> bool:
+        if self._cooler_switch_id is not None and self._is_cooler_active is False:
+            await self.hass.services.async_call(
+                HA_DOMAIN,
+                SERVICE_TURN_ON,
+                {ATTR_ENTITY_ID: self._cooler_switch_id},
+                context=self._context,
+            )
+
+            self._is_cooler_active = True
+            return True
+        return False
+
+    async def _async_cooler_off(self) -> bool:
+        if self._cooler_switch_id is not None and self._is_cooler_active is True:
+            await self.hass.services.async_call(
+                HA_DOMAIN,
+                SERVICE_TURN_OFF,
+                {ATTR_ENTITY_ID: self._cooler_switch_id},
+                context=self._context,
+            )
+
+            self._is_cooler_active = False
+            return True
+        return False
+
+    async def _async_heater_on(self) -> bool:
+        if self._heater_switch_id is not None and self._is_heater_active is False:
+            await self.hass.services.async_call(
+                HA_DOMAIN,
+                SERVICE_TURN_ON,
+                {ATTR_ENTITY_ID: self._heater_switch_id},
+                context=self._context,
+            )
+
+            self._is_heater_active = True
+            return True
+        return False
+
+    async def _async_heater_off(self) -> bool:
+        if self._heater_switch_id is not None and self._is_heater_active is True:
+            await self.hass.services.async_call(
+                HA_DOMAIN,
+                SERVICE_TURN_OFF,
+                {ATTR_ENTITY_ID: self._heater_switch_id},
+                context=self._context,
+            )
+
+            self._is_heater_active = False
+            return True
+        return False
+
+    async def _async_fan_on(self) -> bool:
+        if self._fan_switch_id is not None and self._is_fan_active is False:
+            await self.hass.services.async_call(
+                HA_DOMAIN,
+                SERVICE_TURN_ON,
+                {ATTR_ENTITY_ID: self._fan_switch_id},
+                context=self._context,
+            )
+
+            self._is_fan_active = True
+            return True
+        return False
+
+    async def _async_fan_off(self) -> bool:
+        if self._fan_switch_id is not None and self._is_fan_active is True:
+            await self.hass.services.async_call(
+                HA_DOMAIN,
+                SERVICE_TURN_OFF,
+                {ATTR_ENTITY_ID: self._fan_switch_id},
+                context=self._context,
+            )
+
+            self._is_fan_active = False
+            return True
+        return False
+
+    async def _async_on_temperature_changed(self, event: Event):
+        _LOGGER.debug("Temperature sensor updated")
+
+        new_state = event.data.get("new_state")
+        self._current_temp = float(new_state.state)
+        await self.async_update()
+        self.async_write_ha_state()
+
+    def _on_heater_switch_changed(self, event: Event) -> None:
+        new_state = event.data.get("new_state")
+        is_active = new_state.state == STATE_ON if new_state is not None else False
+
+        if is_active != self._is_heater_active:
+            _LOGGER.debug(
+                "Heater switch changed and differs from current value, updating"
+            )
+            self._is_heater_active = is_active
+
+    def _on_cooler_switch_changed(self, event: Event) -> None:
+        new_state = event.data.get("new_state")
+        is_active = new_state.state == STATE_ON if new_state is not None else False
+
+        if is_active != self._is_cooler_active:
+            _LOGGER.debug(
+                "Cooler switch changed and differs from current value, updating"
+            )
+            self._is_cooler_active = is_active
+
+
+class ClimateSettings:
+    """Class to store current and preset thermostat settings"""
+
+    temp_high: float
+    temp_low: float
+    hvac_mode: HVACMode
+    fan_mode: FanMode
+
+    def __init__(
+        self,
+        temp_low: float,
+        temp_high: float,
+        hvac_mode: HVACMode,
+        fan_mode: FanMode | None,
+    ) -> None:
+        """Initializes an instance of the thermostat preset"""
+        self.temp_high = temp_high
+        self.temp_low = temp_low
+        self.hvac_mode = hvac_mode
+        self.fan_mode = fan_mode
+
+    def clone(self) -> ClimateSettings:
+        """Creates a clone of the settings"""
+        return ClimateSettings(
+            self.temp_low, self.temp_high, self.hvac_mode, self.fan_mode
+        )
