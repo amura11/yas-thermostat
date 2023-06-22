@@ -11,6 +11,8 @@ input_boolean:
   fake_heater:
   fake_cooler:
   fake_fan:
+  fake_opening_1:
+  fake_opening_2:
 
 input_number:
   fake_temp:
@@ -26,6 +28,7 @@ climate:
     heater_switch: input_boolean.fake_heater
     cooler_switch: input_boolean.fake_cooler
     fan_switch: input_boolean.fake_fan
+    openings: [input_boolean.fake_opening_1, input_boolean.fake_opening_2]
     default_preset: Preset2
     min_cycle: 00:00:01
     temp_step: 0.1
@@ -34,6 +37,8 @@ climate:
       target_temp_low: 10.123
       target_temp_high: 20.455
       fan_mode: auto
+      hvac_mode: heat_cool
     - name: Preset2
       target_temp_low: 10.123
       target_temp_high: 20.455
+      hvac_mode: heat_cool
