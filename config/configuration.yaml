@@ -23,22 +23,27 @@ input_number:
 
 climate:
   - platform: yas_thermostat
-    name: Test
+    name: My Thermostat
     temp_sensor: input_number.fake_temp
     heater_switch: input_boolean.fake_heater
     cooler_switch: input_boolean.fake_cooler
     fan_switch: input_boolean.fake_fan
     openings: [input_boolean.fake_opening_1, input_boolean.fake_opening_2]
     default_preset: Preset2
-    min_cycle: 00:00:01
+    cycle_delay: 00:10:00
+    opening_delay: 00:00:15
     temp_step: 0.1
+    temp_tolerance: 0.5
+    max_temp: 32
+    min_temp: 15
+    default_hvac_mode: heat_cool
+    default_fan_mode: auto
     preset_modes:
     - name: Preset1
       target_temp_low: 10.123
       target_temp_high: 20.455
-      fan_mode: auto
-      hvac_mode: heat_cool
+      fan_mode: OFF
+      hvac_mode: heat
     - name: Preset2
       target_temp_low: 10.123
       target_temp_high: 20.455
-      hvac_mode: heat_cool
