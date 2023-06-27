@@ -2,6 +2,7 @@
 [![GitHub Release][releases-shield]][releases]
 [![GitHub Activity][commits-shield]][commits]
 [![License][license-shield]](LICENSE)
+[![hacs][hacsbadge]][hacs]
 
 A simple dual range smart thermostat integration for controlling siwtch entities based on a single temperature sensor. Instead of relying on an existing climate entity this integration allows the user to use any temperature sensor as an input and any switch entities for the output. This allows for greater freedom of control over your devices. This integration isn't meant to handle every possible scenario, instead handle a specific set of scenarios very well. It supports the following features:
  - Dual range temperature contol
@@ -79,3 +80,4 @@ Fan Mode | `fan_mode` | The fan mode to set for the preset. | | `OFF`*
 [commits-shield]: https://img.shields.io/github/commit-activity/y/amura11/yas-thermostat.svg?style=for-the-badge
 [commits]: https://github.com/amura11/yas-thermostat/commits/main
 [license-shield]: https://img.shields.io/github/license/amura11/yas-thermostat.svg?style=for-the-badge
+[hacs]: https://github.com/hacs/integration
