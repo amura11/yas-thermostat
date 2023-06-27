@@ -81,3 +81,4 @@ Fan Mode | `fan_mode` | The fan mode to set for the preset. | | `OFF`*
 [commits]: https://github.com/amura11/yas-thermostat/commits/main
 [license-shield]: https://img.shields.io/github/license/amura11/yas-thermostat.svg?style=for-the-badge
 [hacs]: https://github.com/hacs/integration
+[hacsbadge]: https://img.shields.io/badge/HACS-Custom-orange.svg?style=for-the-badge
