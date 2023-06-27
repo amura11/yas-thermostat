@@ -139,24 +139,21 @@ async def async_setup_platform(
     async_add_entities: AddEntitiesCallback,
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
-    """Setup YAS Thermostat Platform"""
+    """Initialize the YAS Thermostat Platform."""
+
     name: str = config[ATTR_NAME]
     default_hvac_mode = config.get(ATTR_DEFAULT_HVAC_MODE, DEFAULT_HVAC_MODE)
     default_fan_mode = config.get(ATTR_DEFAULT_FAN_MODE, DEFAULT_FAN_MODE)
-    presets = dict(
-        map(
-            lambda p: (
-                p[ATTR_NAME],
-                ClimateSettings(
-                    p.get(ATTR_TARGET_TEMP_LOW),
-                    p.get(ATTR_TARGET_TEMP_HIGH),
-                    p.get(ATTR_HVAC_MODE, default_hvac_mode),
-                    p.get(ATTR_FAN_MODE, default_fan_mode),
-                ),
-            ),
-            config[ATTR_PRESET_MODES],
+
+    def createPreset(c) -> ClimateSettings:
+        return ClimateSettings(
+            c.get(ATTR_TARGET_TEMP_LOW),
+            c.get(ATTR_TARGET_TEMP_HIGH),
+            c.get(ATTR_HVAC_MODE, default_hvac_mode),
+            c.get(ATTR_FAN_MODE, default_fan_mode),
         )
-    )
+
+    presets = {p[ATTR_NAME]: createPreset(p) for p in config[ATTR_PRESET_MODES]}
     heater_switch_id = config.get(ATTR_HEATER_SWITCH)
     cooler_switch_id = config.get(ATTR_COOLER_SWITCH)
     fan_switch_id = config.get(ATTR_FAN_SWITCH)
@@ -196,7 +193,7 @@ async def async_setup_platform(
 
 
 class YetAnotherSmartThermostat(ClimateEntity, RestoreEntity):
-    """Thermostat Class"""
+    """Thermostat Class."""
 
     # Settings
     _heater_switch_id: str | None = None
@@ -260,7 +257,7 @@ class YetAnotherSmartThermostat(ClimateEntity, RestoreEntity):
         default_hvac_mode: HVACMode,
         default_fan_mode: FanMode,
     ) -> None:
-        """Initializes a new instance of the YetAnotherSmartThermostat class"""
+        """Initialize a new instance of the YetAnotherSmartThermostat class."""
         self._name = name
         self._presets = presets
         self._temp_sensor_id = temp_sensor_id
@@ -429,7 +426,7 @@ class YetAnotherSmartThermostat(ClimateEntity, RestoreEntity):
 
     @property
     def name(self) -> str:
-        """Returns the name of the entity"""
+        """Returns the name of the entity."""
         return self._name
 
     @property
@@ -453,7 +450,7 @@ class YetAnotherSmartThermostat(ClimateEntity, RestoreEntity):
         return self._current_temp
 
     async def async_set_temperature(self, **kwargs) -> None:
-        """Sets the new temperature."""
+        """Set the new temperature."""
         temp = kwargs.get(ATTR_TEMPERATURE)
         temp_low = kwargs.get(ATTR_TARGET_TEMP_LOW)
         temp_high = kwargs.get(ATTR_TARGET_TEMP_HIGH)
@@ -499,6 +496,7 @@ class YetAnotherSmartThermostat(ClimateEntity, RestoreEntity):
 
     @property
     def preset_modes(self) -> list[str] | None:
+        """Returns the available preset modes."""
         return list(self._presets.keys())
 
     @property
@@ -521,13 +519,16 @@ class YetAnotherSmartThermostat(ClimateEntity, RestoreEntity):
 
     @property
     def fan_modes(self) -> list[str]:
+        """Return the list of available fan modes."""
         return self._available_fan_modes
 
     @property
     def fan_mode(self) -> str:
+        """Returns the current fan mode."""
         return self._current_settings.fan_mode
 
     async def async_set_fan_mode(self, fan_mode: str | FanMode) -> None:
+        """Set the the new fan mode."""
         _LOGGER.debug("Changing Fan Mode to %s", fan_mode)
 
         self._current_preset = None
@@ -538,6 +539,7 @@ class YetAnotherSmartThermostat(ClimateEntity, RestoreEntity):
 
     @property
     def temperature_unit(self) -> UnitOfTemperature:
+        """Gets the current temperature unit."""
         return self._temp_unit
 
     @property
@@ -547,10 +549,12 @@ class YetAnotherSmartThermostat(ClimateEntity, RestoreEntity):
 
     @property
     def min_temp(self) -> float:
+        """Gets the minimum temperature."""
         return self._temp_min
 
     @property
     def max_temp(self) -> float:
+        """Gets the maximum temperature."""
         return self._temp_max
 
     @property
@@ -601,7 +605,7 @@ class YetAnotherSmartThermostat(ClimateEntity, RestoreEntity):
             )
 
     async def async_update(self) -> None:
-        """Performs the entity update procedure"""
+        """Update the entity."""
         current_time = datetime.now(timezone.utc)
         cooler_changed: bool = False
         heater_changed: bool = False
@@ -774,7 +778,7 @@ class YetAnotherSmartThermostat(ClimateEntity, RestoreEntity):
             self.async_write_ha_state()
 
     def _read_manual_settings(self, state: State) -> ClimateSettings:
-        """Reads the manually set values from the state into a ClimateSettings object"""
+        """Read the manually set values from the state into a ClimateSettings object."""
         temp_low: float | None = state.attributes.get(ATTR_MANUAL_TEMP_LOW)
         temp_high: float | None = state.attributes.get(ATTR_MANUAL_TEMP_HIGH)
         hvac_mode: HVACMode = state.attributes.get(
@@ -792,7 +796,7 @@ class YetAnotherSmartThermostat(ClimateEntity, RestoreEntity):
 
 
 class ClimateSettings:
-    """Class to store current and preset thermostat settings"""
+    """Class to store current and preset thermostat settings."""
 
     temp_high: float
     temp_low: float
@@ -806,14 +810,14 @@ class ClimateSettings:
         hvac_mode: HVACMode,
         fan_mode: FanMode | None,
     ) -> None:
-        """Initializes an instance of the thermostat preset"""
+        """Initialize an instance of the thermostat preset."""
         self.temp_high = temp_high
         self.temp_low = temp_low
         self.hvac_mode = hvac_mode
         self.fan_mode = fan_mode
 
     def clone(self) -> ClimateSettings:
-        """Creates a clone of the settings"""
+        """Create a clone of the settings."""
         return ClimateSettings(
             self.temp_low, self.temp_high, self.hvac_mode, self.fan_mode
         )

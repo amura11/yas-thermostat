@@ -67,7 +67,7 @@ Fan Mode | `fan_mode` | The fan mode to set for the preset. | | `OFF`*
     - name: Preset1
       target_temp_low: 10.123
       target_temp_high: 20.455
-      fan_mode: OFF
+      fan_mode: "off"
       hvac_mode: heat
     - name: Preset2
       target_temp_low: 10.123

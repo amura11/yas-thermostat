@@ -1,4 +1,4 @@
-"""YetAnotherSmartThermostat Constants"""
+"""YetAnotherSmartThermostat Constants."""
 from homeassistant.backports.enum import StrEnum
 
 # Config attribute names
@@ -24,7 +24,7 @@ ATTR_LAST_CYCLE = "last_cycle"
 
 
 class FanMode(StrEnum):
-    """Fan Mode for Climate Devices"""
+    """Fan Mode for Climate Devices."""
 
     OFF = "off"
     ON = "on"
