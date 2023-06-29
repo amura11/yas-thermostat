@@ -1,0 +1,1 @@
+"""The YAS Thermostat integration."""
